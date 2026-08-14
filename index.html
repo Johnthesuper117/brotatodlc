@@ -427,15 +427,19 @@ function setSaveStatus(msg, isError = false) {
   el.style.color = isError ? '#ffb3b3' : '#dfeefd';
 }
 
+let activeRuntime = null;
+
 function getRuntime() {
   const candidates = [
+    activeRuntime,
     window.__brotatoEngine && window.__brotatoEngine.rtenv,
     window.__brotatoEngine,
     window.__brotatoRuntime,
     window.__godot_runtime,
     window.Module,
     window.Godot,
-    window.FS && { FS: window.FS }
+    window.FS && { FS: window.FS },
+    window.IDBFS && { FS: window.IDBFS }
   ].filter(Boolean);
 
   for (const candidate of candidates) {
@@ -450,19 +454,22 @@ function getRuntime() {
   return null;
 }
 
-function isSaveRuntimeReady(runtime) {
-  if (!runtime) return false;
+function resolveFS(runtime) {
+  if (runtime && (runtime.FS || runtime['FS'])) {
+    return runtime.FS || runtime['FS'];
+  }
+  if (window.FS) return window.FS;
+  if (window.Module && window.Module.FS) return window.Module.FS;
+  if (window.Godot && window.Godot.FS) return window.Godot.FS;
+  return null;
+}
 
-  const fs = runtime.FS || runtime['FS'];
+function isSaveRuntimeReady(runtime) {
+  const fs = resolveFS(runtime);
   if (fs && (typeof fs.readdir === 'function' || typeof fs.syncfs === 'function' || typeof fs.mkdirTree === 'function')) {
     return true;
   }
-
-  if (runtime.initFS || runtime['initFS']) {
-    return true;
-  }
-
-  return !!window.__brotatoGameReady;
+  return !!(runtime && (runtime.initFS || runtime['initFS'])) || !!window.__brotatoGameReady;
 }
 
 async function waitForGameReady(maxWaitMs = 60000, intervalMs = 200) {
@@ -471,12 +478,14 @@ async function waitForGameReady(maxWaitMs = 60000, intervalMs = 200) {
   while (Date.now() - start < maxWaitMs) {
     const runtime = getRuntime();
     if (isSaveRuntimeReady(runtime)) {
-      return runtime || { FS: window.FS };
+      activeRuntime = runtime || activeRuntime;
+      return runtime || activeRuntime || { FS: resolveFS(window) };
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
 
-  return getRuntime() || { FS: window.FS };
+  activeRuntime = activeRuntime || getRuntime();
+  return activeRuntime || { FS: resolveFS(window) };
 }
 
 function uint8ToBase64(bytes) {
@@ -503,9 +512,10 @@ function normalizePath(path) {
 
 async function flushRuntimeFS() {
   const runtime = getRuntime();
-  if (!runtime || !runtime.FS || !runtime.FS.syncfs) return;
+  const FS = resolveFS(runtime) || resolveFS(window);
+  if (!FS || !FS.syncfs) return;
   await new Promise((resolve, reject) => {
-    runtime.FS.syncfs(false, function (err) {
+    FS.syncfs(false, function (err) {
       if (err) { reject(err); return; }
       resolve();
     });
@@ -514,11 +524,10 @@ async function flushRuntimeFS() {
 
 function collectUserfsFiles() {
   const runtime = getRuntime();
-  if (!runtime || !runtime.FS) {
+  const FS = resolveFS(runtime) || resolveFS(window);
+  if (!FS) {
     throw new Error('The game is not ready yet. Please wait for it to finish loading.');
   }
-
-  const FS = runtime.FS;
   const root = '/userfs';
   const files = [];
   const stack = [root];
@@ -810,6 +819,7 @@ function attachSavePanel() {
     window.__brotatoGameReady = false;
     const attachRuntime = runtime => {
       if (!runtime) return;
+      activeRuntime = runtime;
       window.__brotatoRuntime = runtime;
       window.__godot_runtime = runtime;
       window.__brotatoGameReady = true;
