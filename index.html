@@ -26,7 +26,8 @@ canvas{
 canvas:focus{outline:none}
 
 .save-panel{
-  position:fixed;right:18px;bottom:18px;z-index:60;
+  position:fixed;right:18px;bottom:18px;left:auto;top:auto;
+  z-index:2147483647;display:block;visibility:visible;opacity:1;
   width:min(340px,calc(100vw - 24px));
   background:rgba(15,17,30,0.8);
   border:1px solid rgba(255,255,255,0.09);
@@ -36,7 +37,10 @@ canvas:focus{outline:none}
   -webkit-backdrop-filter:blur(10px);
   overflow:hidden;
   pointer-events:auto;
+  transform:translateZ(0);
 }
+
+canvas{z-index:0}
 
 .save-panel.collapsed{width:auto;min-width:180px}
 
@@ -707,6 +711,14 @@ async function fetchParts(key, filename, count, padded, totalBytes) {
     const saveHeader = $('save-panel-header');
     const saveMin = $('save-panel-minimize');
     const importInput = $('save-import-file');
+
+    savePanel.style.display = 'block';
+    savePanel.style.visibility = 'visible';
+    savePanel.style.opacity = '1';
+    savePanel.style.right = '18px';
+    savePanel.style.bottom = '18px';
+    savePanel.style.left = 'auto';
+    savePanel.style.top = 'auto';
 
     let dragState = null;
     saveHeader.addEventListener('pointerdown', event => {
