@@ -431,6 +431,20 @@ function getRuntime() {
   return window.__brotatoEngine && window.__brotatoEngine.rtenv ? window.__brotatoEngine.rtenv : null;
 }
 
+async function waitForGameReady(maxWaitMs = 20000, intervalMs = 200) {
+  const start = Date.now();
+
+  while (Date.now() - start < maxWaitMs) {
+    const runtime = getRuntime();
+    if (runtime && runtime.FS && typeof runtime.FS.readdir === 'function' && typeof runtime.FS.syncfs === 'function') {
+      return runtime;
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error('The game is still loading. Please wait a moment and try again.');
+}
+
 function uint8ToBase64(bytes) {
   let binary = '';
   const chunkSize = 0x8000;
@@ -533,6 +547,9 @@ function collectUserfsFiles() {
 
 async function exportSaveData() {
   try {
+    setSaveStatus('Waiting for the game to finish loading its save data...');
+    const runtime = await waitForGameReady();
+    window.__brotatoEngine.rtenv = runtime;
     await flushRuntimeFS();
     const files = collectUserfsFiles();
     const payload = {
@@ -563,13 +580,16 @@ async function importSaveDataFromFile(file) {
   if (!file) return;
 
   try {
+    setSaveStatus('Waiting for the game to finish loading its save data...');
+    const runtime = await waitForGameReady();
+    window.__brotatoEngine.rtenv = runtime;
+
     const text = await file.text();
     const payload = JSON.parse(text);
     if (!payload || !Array.isArray(payload.files)) {
       throw new Error('This is not a valid Brotato save file.');
     }
 
-    const runtime = getRuntime();
     if (!runtime || !runtime.FS) {
       throw new Error('The game is not ready yet. Please wait for the game to finish loading.');
     }
