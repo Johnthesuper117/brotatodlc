@@ -25,6 +25,74 @@ canvas{
 }
 canvas:focus{outline:none}
 
+.save-panel{
+  position:fixed;right:18px;bottom:18px;z-index:60;
+  width:min(340px,calc(100vw - 24px));
+  background:rgba(15,17,30,0.8);
+  border:1px solid rgba(255,255,255,0.09);
+  border-radius:18px;
+  box-shadow:0 16px 48px rgba(0,0,0,0.45);
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  overflow:hidden;
+  pointer-events:auto;
+}
+
+.save-panel.collapsed{width:auto;min-width:180px}
+
+.save-panel-header{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:10px;padding:10px 12px 8px;
+  background:rgba(255,255,255,0.02);
+  border-bottom:1px solid rgba(255,255,255,0.06);
+  user-select:none;cursor:grab;
+}
+.save-panel-header:active{cursor:grabbing}
+
+.save-panel-title{
+  font-size:0.7rem;font-weight:800;
+  letter-spacing:0.12em;text-transform:uppercase;
+  color:rgba(255,255,255,0.72);
+}
+
+.save-panel-actions{display:flex;align-items:center;gap:8px}
+
+.save-panel-btn{
+  appearance:none;border:1px solid rgba(255,255,255,0.09);
+  background:rgba(255,255,255,0.03);color:#f2f7ff;
+  border-radius:10px;padding:5px 8px;min-width:32px;height:28px;
+  font-size:0.8rem;font-weight:700;cursor:pointer;
+  transition:transform 0.18s ease,background 0.18s ease;
+}
+.save-panel-btn:hover{background:rgba(255,255,255,0.08);transform:translateY(-1px)}
+
+.save-panel-body{padding:12px}
+.save-panel.collapsed .save-panel-body{display:none}
+
+.save-panel-status{
+  font-size:0.7rem;line-height:1.45;color:#dfeefd;
+  min-height:2.2em;margin-bottom:10px;
+}
+
+.save-panel-row{display:flex;gap:8px;flex-wrap:wrap}
+
+.save-panel-primary,
+.save-panel-secondary{
+  flex:1 1 120px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);
+  background:linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02));
+  color:#f2f7ff;font-weight:700;padding:10px 12px;cursor:pointer;
+  transition:transform 0.18s ease,filter 0.18s ease;
+}
+.save-panel-primary:hover,
+.save-panel-secondary:hover{filter:brightness(1.08);transform:translateY(-1px)}
+
+.save-panel-primary{background:linear-gradient(180deg,rgba(105,240,174,0.2),rgba(105,240,174,0.04));border-color:rgba(105,240,174,0.28)}
+.save-panel-secondary{background:linear-gradient(180deg,rgba(79,195,247,0.18),rgba(79,195,247,0.04));border-color:rgba(79,195,247,0.28)}
+
+@media (max-width: 520px){
+  .save-panel{right:10px;bottom:10px;width:min(290px,calc(100vw - 20px));}
+}
+
 /* ─── Loader wrapper ─── */
 #loader{
   position:fixed;inset:0;z-index:50;
@@ -196,6 +264,23 @@ canvas:focus{outline:none}
 <body>
 <canvas id="canvas"></canvas>
 
+<div id="save-panel" class="save-panel" aria-live="polite">
+  <div id="save-panel-header" class="save-panel-header">
+    <div class="save-panel-title">Save Data</div>
+    <div class="save-panel-actions">
+      <button id="save-panel-minimize" class="save-panel-btn" type="button" aria-label="Minimize save panel">—</button>
+    </div>
+  </div>
+  <div id="save-panel-body" class="save-panel-body">
+    <div id="save-panel-status" class="save-panel-status">Progress will be saved here after the game loads.</div>
+    <div class="save-panel-row">
+      <button id="save-export-btn" class="save-panel-primary" type="button">Export Save</button>
+      <button id="save-import-btn" class="save-panel-secondary" type="button">Import Save</button>
+    </div>
+  </div>
+</div>
+<input id="save-import-file" type="file" accept=".json,application/json" hidden />
+
 <div id="loader">
   <div class="blob b1"></div>
   <div class="blob b2"></div>
@@ -331,6 +416,187 @@ function showError(msg) {
   setStatus('Load failed. See above for details.');
 }
 
+function setSaveStatus(msg, isError = false) {
+  const el = $('save-panel-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isError ? '#ffb3b3' : '#dfeefd';
+}
+
+function getRuntime() {
+  return window.__brotatoEngine && window.__brotatoEngine.rtenv ? window.__brotatoEngine.rtenv : null;
+}
+
+function uint8ToBase64(bytes) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8(str) {
+  const binary = atob(str || '');
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+function normalizePath(path) {
+  return String(path || '').replace(/\\/g, '/').replace(/\/+/g, '/');
+}
+
+async function flushRuntimeFS() {
+  const runtime = getRuntime();
+  if (!runtime || !runtime.FS || !runtime.FS.syncfs) return;
+  await new Promise((resolve, reject) => {
+    runtime.FS.syncfs(false, function (err) {
+      if (err) { reject(err); return; }
+      resolve();
+    });
+  });
+}
+
+function collectUserfsFiles() {
+  const runtime = getRuntime();
+  if (!runtime || !runtime.FS) {
+    throw new Error('The game is not ready yet. Please wait for it to finish loading.');
+  }
+
+  const FS = runtime.FS;
+  const root = '/userfs';
+  const files = [];
+  const stack = [root];
+  const visited = new Set();
+
+  while (stack.length > 0) {
+    const current = normalizePath(stack.pop());
+    if (!current || visited.has(current)) continue;
+    visited.add(current);
+
+    let entries;
+    try {
+      entries = FS.readdir(current);
+    } catch (err) {
+      continue;
+    }
+
+    for (const name of entries) {
+      const fullPath = normalizePath(`${current}/${name}`);
+      let node;
+      try {
+        node = FS.lookupPath(fullPath).node;
+      } catch (err) {
+        continue;
+      }
+
+      if ((node.mode & 16384) === 16384) {
+        stack.push(fullPath);
+      } else {
+        let raw;
+        try {
+          raw = FS.readFile(fullPath);
+        } catch (err) {
+          continue;
+        }
+
+        let bytes;
+        if (raw instanceof Uint8Array) {
+          bytes = raw;
+        } else if (ArrayBuffer.isView(raw)) {
+          bytes = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+        } else if (raw instanceof ArrayBuffer) {
+          bytes = new Uint8Array(raw);
+        } else if (typeof raw === 'string') {
+          bytes = new TextEncoder().encode(raw);
+        } else {
+          continue;
+        }
+
+        files.push({
+          path: fullPath,
+          data: uint8ToBase64(bytes)
+        });
+      }
+    }
+  }
+
+  return files;
+}
+
+async function exportSaveData() {
+  try {
+    await flushRuntimeFS();
+    const files = collectUserfsFiles();
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      app: 'brotato-web',
+      files
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `brotato-save-${Date.now()}.json`;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setSaveStatus(`Exported ${files.length} saved file(s) from your local browser data.`);
+  } catch (err) {
+    console.error('[Brotato save export]', err);
+    setSaveStatus(err && err.message ? err.message : 'Unable to export save data.', true);
+  }
+}
+
+async function importSaveDataFromFile(file) {
+  if (!file) return;
+
+  try {
+    const text = await file.text();
+    const payload = JSON.parse(text);
+    if (!payload || !Array.isArray(payload.files)) {
+      throw new Error('This is not a valid Brotato save file.');
+    }
+
+    const runtime = getRuntime();
+    if (!runtime || !runtime.FS) {
+      throw new Error('The game is not ready yet. Please wait for the game to finish loading.');
+    }
+
+    const FS = runtime.FS;
+    for (const entry of payload.files) {
+      const rawPath = normalizePath(entry && entry.path ? entry.path : '');
+      if (!rawPath) continue;
+      const resolvedPath = rawPath.startsWith('/userfs') ? rawPath : `/userfs${rawPath.startsWith('/') ? rawPath : '/' + rawPath}`;
+      const directory = resolvedPath.includes('/') ? resolvedPath.slice(0, resolvedPath.lastIndexOf('/')) : '/';
+      if (directory && directory !== '/') {
+        FS.mkdirTree(directory);
+      }
+      const bytes = base64ToUint8(entry.data || '');
+      FS.writeFile(resolvedPath, bytes, { encoding: 'binary' });
+    }
+
+    await new Promise((resolve, reject) => {
+      FS.syncfs(false, function (err) {
+        if (err) { reject(err); return; }
+        resolve();
+      });
+    });
+
+    setSaveStatus('Imported save data successfully. Your progress is ready in this browser.');
+  } catch (err) {
+    console.error('[Brotato save import]', err);
+    setSaveStatus(err && err.message ? err.message : 'Unable to import save data.', true);
+  }
+}
+
 /* ── fetch + merge all parts for one file ── */
 async function fetchParts(key, filename, count, padded, totalBytes) {
   const bk = BADGE[key];
@@ -411,6 +677,7 @@ async function fetchParts(key, filename, count, padded, totalBytes) {
     cardState('init', 'active');
 
     const engine = new Engine(GODOT_CONFIG);
+    window.__brotatoEngine = engine;
 
     await engine.startGame({
       executable: CDN + 'index',   /* Local index.worker.js */
@@ -429,11 +696,56 @@ async function fetchParts(key, filename, count, padded, totalBytes) {
     cardState('init', 'done');
     setBadge('init', 'Ready', BADGE.ok.bg, BADGE.ok.color, false);
     setStatus('');
+    setSaveStatus('Ready. Export or import your local browser save data at any time.');
 
     const loader = $('loader');
     loader.style.opacity = '0';
     loader.style.pointerEvents = 'none';
     setTimeout(() => { loader.style.display = 'none'; }, 750);
+
+    const savePanel = $('save-panel');
+    const saveHeader = $('save-panel-header');
+    const saveMin = $('save-panel-minimize');
+    const importInput = $('save-import-file');
+
+    let dragState = null;
+    saveHeader.addEventListener('pointerdown', event => {
+      if (event.target.closest('button')) return;
+      dragState = {
+        x: event.clientX,
+        y: event.clientY,
+        left: savePanel.offsetLeft || parseFloat(getComputedStyle(savePanel).right) * -1 || 0,
+        top: savePanel.offsetTop || 0
+      };
+    });
+
+    window.addEventListener('pointermove', event => {
+      if (!dragState) return;
+      const nextLeft = Math.min(window.innerWidth - savePanel.offsetWidth - 10, Math.max(10, dragState.left + (event.clientX - dragState.x)));
+      const nextTop = Math.min(window.innerHeight - savePanel.offsetHeight - 10, Math.max(10, dragState.top + (event.clientY - dragState.y)));
+      savePanel.style.left = `${nextLeft}px`;
+      savePanel.style.top = `${nextTop}px`;
+      savePanel.style.right = 'auto';
+      savePanel.style.bottom = 'auto';
+    });
+
+    window.addEventListener('pointerup', () => {
+      dragState = null;
+    });
+
+    saveMin.addEventListener('click', () => {
+      savePanel.classList.toggle('collapsed');
+      saveMin.textContent = savePanel.classList.contains('collapsed') ? '▢' : '—';
+      setSaveStatus(savePanel.classList.contains('collapsed') ? 'Panel minimized. Drag it back out when you want to save or load.' : 'Ready. Export or import your local browser save data at any time.');
+    });
+
+    $('save-export-btn').addEventListener('click', exportSaveData);
+    $('save-import-btn').addEventListener('click', () => importInput.click());
+    importInput.addEventListener('change', event => {
+      const file = event.target.files && event.target.files[0];
+      if (file) importSaveDataFromFile(file);
+      event.target.value = '';
+    });
 
   } catch (e) {
     console.error('[Brotato loader]', e);
