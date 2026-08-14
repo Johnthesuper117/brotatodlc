@@ -428,21 +428,55 @@ function setSaveStatus(msg, isError = false) {
 }
 
 function getRuntime() {
-  return window.__brotatoEngine && window.__brotatoEngine.rtenv ? window.__brotatoEngine.rtenv : null;
+  const candidates = [
+    window.__brotatoEngine && window.__brotatoEngine.rtenv,
+    window.__brotatoEngine,
+    window.__brotatoRuntime,
+    window.__godot_runtime,
+    window.Module,
+    window.Godot,
+    window.FS && { FS: window.FS }
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const fs = candidate.FS || candidate['FS'];
+    const hasFsApi = !!(fs && (typeof fs.readdir === 'function' || typeof fs.syncfs === 'function' || typeof fs.mkdirTree === 'function'));
+    const hasEmscriptenRuntime = !!(candidate.HEAP8 || candidate['HEAP8'] || candidate.cwrap || candidate['cwrap'] || candidate.initFS || candidate['initFS']);
+    if (hasFsApi || hasEmscriptenRuntime) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
-async function waitForGameReady(maxWaitMs = 20000, intervalMs = 200) {
+function isSaveRuntimeReady(runtime) {
+  if (!runtime) return false;
+
+  const fs = runtime.FS || runtime['FS'];
+  if (fs && (typeof fs.readdir === 'function' || typeof fs.syncfs === 'function' || typeof fs.mkdirTree === 'function')) {
+    return true;
+  }
+
+  if (runtime.initFS || runtime['initFS']) {
+    return true;
+  }
+
+  return !!window.__brotatoGameReady;
+}
+
+async function waitForGameReady(maxWaitMs = 60000, intervalMs = 200) {
   const start = Date.now();
 
   while (Date.now() - start < maxWaitMs) {
     const runtime = getRuntime();
-    if (runtime && runtime.FS && typeof runtime.FS.readdir === 'function' && typeof runtime.FS.syncfs === 'function') {
-      return runtime;
+    if (isSaveRuntimeReady(runtime)) {
+      return runtime || { FS: window.FS };
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
 
-  throw new Error('The game is still loading. Please wait a moment and try again.');
+  return getRuntime() || { FS: window.FS };
 }
 
 function uint8ToBase64(bytes) {
@@ -549,7 +583,10 @@ async function exportSaveData() {
   try {
     setSaveStatus('Waiting for the game to finish loading its save data...');
     const runtime = await waitForGameReady();
-    window.__brotatoEngine.rtenv = runtime;
+    if (runtime && runtime !== window.__brotatoEngine) {
+      window.__brotatoEngine = window.__brotatoEngine || {};
+      window.__brotatoEngine.rtenv = runtime;
+    }
     await flushRuntimeFS();
     const files = collectUserfsFiles();
     const payload = {
@@ -582,7 +619,10 @@ async function importSaveDataFromFile(file) {
   try {
     setSaveStatus('Waiting for the game to finish loading its save data...');
     const runtime = await waitForGameReady();
-    window.__brotatoEngine.rtenv = runtime;
+    if (runtime && runtime !== window.__brotatoEngine) {
+      window.__brotatoEngine = window.__brotatoEngine || {};
+      window.__brotatoEngine.rtenv = runtime;
+    }
 
     const text = await file.text();
     const payload = JSON.parse(text);
@@ -591,7 +631,7 @@ async function importSaveDataFromFile(file) {
     }
 
     if (!runtime || !runtime.FS) {
-      throw new Error('The game is not ready yet. Please wait for the game to finish loading.');
+      throw new Error('The game is still not ready. Saving is still available after 60 seconds if the browser is slow.');
     }
 
     const FS = runtime.FS;
@@ -660,8 +700,73 @@ async function fetchParts(key, filename, count, padded, totalBytes) {
   return merged.buffer;
 }
 
+function attachSavePanel() {
+  const savePanel = $('save-panel');
+  const saveHeader = $('save-panel-header');
+  const saveMin = $('save-panel-minimize');
+  const importInput = $('save-import-file');
+  const loader = $('loader');
+
+  if (!savePanel || !saveHeader || !saveMin || !importInput) return;
+
+  savePanel.style.display = 'block';
+  savePanel.style.visibility = 'visible';
+  savePanel.style.opacity = '1';
+  savePanel.style.right = '18px';
+  savePanel.style.bottom = '18px';
+  savePanel.style.left = 'auto';
+  savePanel.style.top = 'auto';
+  savePanel.style.pointerEvents = 'auto';
+  savePanel.style.zIndex = '2147483647';
+
+  if (loader) {
+    loader.style.pointerEvents = 'none';
+  }
+
+  let dragState = null;
+  saveHeader.addEventListener('pointerdown', event => {
+    if (event.target.closest('button')) return;
+    dragState = {
+      x: event.clientX,
+      y: event.clientY,
+      left: savePanel.offsetLeft || 0,
+      top: savePanel.offsetTop || 0
+    };
+  });
+
+  window.addEventListener('pointermove', event => {
+    if (!dragState) return;
+    const nextLeft = Math.min(window.innerWidth - savePanel.offsetWidth - 10, Math.max(10, dragState.left + (event.clientX - dragState.x)));
+    const nextTop = Math.min(window.innerHeight - savePanel.offsetHeight - 10, Math.max(10, dragState.top + (event.clientY - dragState.y)));
+    savePanel.style.left = `${nextLeft}px`;
+    savePanel.style.top = `${nextTop}px`;
+    savePanel.style.right = 'auto';
+    savePanel.style.bottom = 'auto';
+  });
+
+  window.addEventListener('pointerup', () => {
+    dragState = null;
+  });
+
+  saveMin.addEventListener('click', () => {
+    savePanel.classList.toggle('collapsed');
+    saveMin.textContent = savePanel.classList.contains('collapsed') ? '▢' : '—';
+    setSaveStatus(savePanel.classList.contains('collapsed') ? 'Panel minimized. Drag it back out when you want to save or load.' : 'Ready. Export or import your local browser save data at any time.');
+  });
+
+  $('save-export-btn').addEventListener('click', exportSaveData);
+  $('save-import-btn').addEventListener('click', () => importInput.click());
+  importInput.addEventListener('change', event => {
+    const file = event.target.files && event.target.files[0];
+    if (file) importSaveDataFromFile(file);
+    event.target.value = '';
+  });
+}
+
 /* ── main ── */
 (async () => {
+  attachSavePanel();
+
   if (!Engine.isWebGLAvailable()) {
     showError('WebGL is unavailable. Try a different browser or enable hardware acceleration in your browser settings.');
     return;
@@ -702,6 +807,13 @@ async function fetchParts(key, filename, count, padded, totalBytes) {
 
     const engine = new Engine(GODOT_CONFIG);
     window.__brotatoEngine = engine;
+    window.__brotatoGameReady = false;
+    const attachRuntime = runtime => {
+      if (!runtime) return;
+      window.__brotatoRuntime = runtime;
+      window.__godot_runtime = runtime;
+      window.__brotatoGameReady = true;
+    };
 
     await engine.startGame({
       executable: CDN + 'index',   /* Local index.worker.js */
@@ -720,64 +832,16 @@ async function fetchParts(key, filename, count, padded, totalBytes) {
     cardState('init', 'done');
     setBadge('init', 'Ready', BADGE.ok.bg, BADGE.ok.color, false);
     setStatus('');
+    attachRuntime(window.__brotatoEngine && window.__brotatoEngine.rtenv);
+    window.__brotatoGameReady = !!(window.__brotatoEngine && window.__brotatoEngine.rtenv);
     setSaveStatus('Ready. Export or import your local browser save data at any time.');
 
     const loader = $('loader');
-    loader.style.opacity = '0';
-    loader.style.pointerEvents = 'none';
-    setTimeout(() => { loader.style.display = 'none'; }, 750);
-
-    const savePanel = $('save-panel');
-    const saveHeader = $('save-panel-header');
-    const saveMin = $('save-panel-minimize');
-    const importInput = $('save-import-file');
-
-    savePanel.style.display = 'block';
-    savePanel.style.visibility = 'visible';
-    savePanel.style.opacity = '1';
-    savePanel.style.right = '18px';
-    savePanel.style.bottom = '18px';
-    savePanel.style.left = 'auto';
-    savePanel.style.top = 'auto';
-
-    let dragState = null;
-    saveHeader.addEventListener('pointerdown', event => {
-      if (event.target.closest('button')) return;
-      dragState = {
-        x: event.clientX,
-        y: event.clientY,
-        left: savePanel.offsetLeft || parseFloat(getComputedStyle(savePanel).right) * -1 || 0,
-        top: savePanel.offsetTop || 0
-      };
-    });
-
-    window.addEventListener('pointermove', event => {
-      if (!dragState) return;
-      const nextLeft = Math.min(window.innerWidth - savePanel.offsetWidth - 10, Math.max(10, dragState.left + (event.clientX - dragState.x)));
-      const nextTop = Math.min(window.innerHeight - savePanel.offsetHeight - 10, Math.max(10, dragState.top + (event.clientY - dragState.y)));
-      savePanel.style.left = `${nextLeft}px`;
-      savePanel.style.top = `${nextTop}px`;
-      savePanel.style.right = 'auto';
-      savePanel.style.bottom = 'auto';
-    });
-
-    window.addEventListener('pointerup', () => {
-      dragState = null;
-    });
-
-    saveMin.addEventListener('click', () => {
-      savePanel.classList.toggle('collapsed');
-      saveMin.textContent = savePanel.classList.contains('collapsed') ? '▢' : '—';
-      setSaveStatus(savePanel.classList.contains('collapsed') ? 'Panel minimized. Drag it back out when you want to save or load.' : 'Ready. Export or import your local browser save data at any time.');
-    });
-
-    $('save-export-btn').addEventListener('click', exportSaveData);
-    $('save-import-btn').addEventListener('click', () => importInput.click());
-    importInput.addEventListener('change', event => {
-      const file = event.target.files && event.target.files[0];
-      if (file) importSaveDataFromFile(file);
-      event.target.value = '';
-    });
+    if (loader) {
+      loader.style.opacity = '0';
+      loader.style.pointerEvents = 'none';
+      setTimeout(() => { loader.style.display = 'none'; }, 750);
+    }
 
   } catch (e) {
     console.error('[Brotato loader]', e);
