@@ -464,12 +464,16 @@ function resolveFS(runtime) {
   return null;
 }
 
-function isSaveRuntimeReady(runtime) {
-  const fs = resolveFS(runtime);
-  if (fs && (typeof fs.readdir === 'function' || typeof fs.syncfs === 'function' || typeof fs.mkdirTree === 'function')) {
-    return true;
+function getSaveFS(runtime = getRuntime()) {
+  const fs = resolveFS(runtime) || resolveFS(window);
+  if (!fs || typeof fs.readdir !== 'function' || typeof fs.readFile !== 'function' || typeof fs.writeFile !== 'function') {
+    return null;
   }
-  return !!(runtime && (runtime.initFS || runtime['initFS'])) || !!window.__brotatoGameReady;
+  return fs;
+}
+
+function isSaveRuntimeReady(runtime) {
+  return !!getSaveFS(runtime);
 }
 
 async function waitForGameReady(maxWaitMs = 60000, intervalMs = 200) {
@@ -524,7 +528,7 @@ async function flushRuntimeFS() {
 
 function collectUserfsFiles() {
   const runtime = getRuntime();
-  const FS = resolveFS(runtime) || resolveFS(window);
+  const FS = getSaveFS(runtime);
   if (!FS) {
     throw new Error('The game is not ready yet. Please wait for it to finish loading.');
   }
@@ -588,6 +592,48 @@ function collectUserfsFiles() {
   return files;
 }
 
+function isSafeUserfsPath(path) {
+  const parts = normalizePath(path).split('/');
+  const relativeParts = parts.slice(2);
+  return parts[0] === '' && parts[1] === 'userfs' && relativeParts.length > 0 && relativeParts.every(part => part !== '' && part !== '.' && part !== '..');
+}
+
+function clearUserfsFiles(FS) {
+  const directories = [];
+  const stack = ['/userfs'];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = FS.readdir(current);
+    } catch (err) {
+      continue;
+    }
+
+    for (const name of entries) {
+      const fullPath = normalizePath(`${current}/${name}`);
+      if (name === '.' || name === '..') continue;
+      let node;
+      try {
+        node = FS.lookupPath(fullPath).node;
+      } catch (err) {
+        continue;
+      }
+      if ((node.mode & 16384) === 16384) {
+        directories.push(fullPath);
+        stack.push(fullPath);
+      } else {
+        FS.unlink(fullPath);
+      }
+    }
+  }
+
+  for (let i = directories.length - 1; i >= 0; i--) {
+    FS.rmdir(directories[i]);
+  }
+}
+
 async function exportSaveData() {
   try {
     setSaveStatus('Waiting for the game to finish loading its save data...');
@@ -627,33 +673,34 @@ async function importSaveDataFromFile(file) {
 
   try {
     setSaveStatus('Waiting for the game to finish loading its save data...');
-    const runtime = await waitForGameReady();
-    if (runtime && runtime !== window.__brotatoEngine) {
-      window.__brotatoEngine = window.__brotatoEngine || {};
-      window.__brotatoEngine.rtenv = runtime;
-    }
-
     const text = await file.text();
     const payload = JSON.parse(text);
-    if (!payload || !Array.isArray(payload.files)) {
+    if (!payload || payload.version !== 1 || !Array.isArray(payload.files)) {
       throw new Error('This is not a valid Brotato save file.');
     }
 
-    if (!runtime || !runtime.FS) {
-      throw new Error('The game is still not ready. Saving is still available after 60 seconds if the browser is slow.');
-    }
+    const runtime = await waitForGameReady();
+    const FS = getSaveFS(runtime);
+    if (!FS) throw new Error('The game is still loading. Please try again when it has finished loading.');
 
-    const FS = runtime.FS;
-    for (const entry of payload.files) {
+    const files = payload.files.map(entry => {
       const rawPath = normalizePath(entry && entry.path ? entry.path : '');
-      if (!rawPath) continue;
       const resolvedPath = rawPath.startsWith('/userfs') ? rawPath : `/userfs${rawPath.startsWith('/') ? rawPath : '/' + rawPath}`;
+      if (!isSafeUserfsPath(resolvedPath) || typeof entry.data !== 'string') {
+        throw new Error('This save file contains an invalid entry.');
+      }
+      return { path: resolvedPath, data: base64ToUint8(entry.data) };
+    });
+
+    clearUserfsFiles(FS);
+    FS.mkdirTree('/userfs');
+    for (const entry of files) {
+      const resolvedPath = entry.path;
       const directory = resolvedPath.includes('/') ? resolvedPath.slice(0, resolvedPath.lastIndexOf('/')) : '/';
       if (directory && directory !== '/') {
         FS.mkdirTree(directory);
       }
-      const bytes = base64ToUint8(entry.data || '');
-      FS.writeFile(resolvedPath, bytes, { encoding: 'binary' });
+      FS.writeFile(resolvedPath, entry.data, { encoding: 'binary' });
     }
 
     await new Promise((resolve, reject) => {
@@ -663,7 +710,8 @@ async function importSaveDataFromFile(file) {
       });
     });
 
-    setSaveStatus('Imported save data successfully. Your progress is ready in this browser.');
+    setSaveStatus('Imported successfully. Reloading the game with your restored progress...');
+    window.setTimeout(() => window.location.reload(), 150);
   } catch (err) {
     console.error('[Brotato save import]', err);
     setSaveStatus(err && err.message ? err.message : 'Unable to import save data.', true);
