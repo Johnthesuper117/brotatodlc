@@ -10,6 +10,7 @@ var Module=typeof Godot!="undefined"?Godot:{};var readyPromiseResolve,readyPromi
 
 	Godot["FS"] = FS;
 	Godot["IDBFS"] = IDBFS;
+	Godot["syncFS"] = function () { return GodotFS.sync(); };
 	return Godot.ready
 }
 

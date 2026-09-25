@@ -514,20 +514,21 @@ function normalizePath(path) {
   return String(path || '').replace(/\\/g, '/').replace(/\/+/g, '/');
 }
 
-async function flushRuntimeFS() {
-  const runtime = getRuntime();
+async function flushRuntimeFS(runtime) {
+  if (runtime && typeof runtime.syncFS === 'function') {
+    const error = await runtime.syncFS();
+    if (error) throw error;
+    return;
+  }
+
   const FS = resolveFS(runtime) || resolveFS(window);
   if (!FS || !FS.syncfs) return;
-  await new Promise((resolve, reject) => {
-    FS.syncfs(false, function (err) {
-      if (err) { reject(err); return; }
-      resolve();
-    });
-  });
+  await new Promise((resolve, reject) => FS.syncfs(false, err => err ? reject(err) : resolve()));
 }
 
-function collectUserfsFiles() {
-  const runtime = getRuntime();
+const yieldToBrowser = () => new Promise(resolve => setTimeout(resolve, 0));
+
+async function collectUserfsFiles(runtime = getRuntime()) {
   const FS = getSaveFS(runtime);
   if (!FS) {
     throw new Error('The game is not ready yet. Please wait for it to finish loading.');
@@ -541,6 +542,7 @@ function collectUserfsFiles() {
     const current = normalizePath(stack.pop());
     if (!current || visited.has(current)) continue;
     visited.add(current);
+    await yieldToBrowser();
 
     let entries;
     try {
@@ -550,6 +552,7 @@ function collectUserfsFiles() {
     }
 
     for (const name of entries) {
+      if (name === '.' || name === '..') continue;
       const fullPath = normalizePath(`${current}/${name}`);
       let node;
       try {
@@ -642,8 +645,8 @@ async function exportSaveData() {
       window.__brotatoEngine = window.__brotatoEngine || {};
       window.__brotatoEngine.rtenv = runtime;
     }
-    await flushRuntimeFS();
-    const files = collectUserfsFiles();
+    await flushRuntimeFS(runtime);
+    const files = await collectUserfsFiles(runtime);
     const payload = {
       version: 1,
       exportedAt: new Date().toISOString(),
@@ -703,12 +706,7 @@ async function importSaveDataFromFile(file) {
       FS.writeFile(resolvedPath, entry.data, { encoding: 'binary' });
     }
 
-    await new Promise((resolve, reject) => {
-      FS.syncfs(false, function (err) {
-        if (err) { reject(err); return; }
-        resolve();
-      });
-    });
+    await flushRuntimeFS(runtime);
 
     setSaveStatus('Imported successfully. Reloading the game with your restored progress...');
     window.setTimeout(() => window.location.reload(), 150);
